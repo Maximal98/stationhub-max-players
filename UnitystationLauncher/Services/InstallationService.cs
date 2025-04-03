@@ -438,9 +438,6 @@ public class InstallationService : IInstallationService
 
     private async Task StartDownloadAsync(Download download)
     {
-        //Update TTS if it's needed
-        await _TTSVersionService.CheckAndDownloadLatestVersion(download);
-
         Log.Information("Download requested, Installation Path '{Path}', Url '{Url}'", download.InstallPath, download.DownloadUrl);
         try
         {

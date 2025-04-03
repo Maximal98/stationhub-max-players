@@ -1,16 +1,11 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
-using System.Reactive.Concurrency;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
-using Avalonia.Controls.Shapes;
 using Mono.Unix;
-using ReactiveUI;
 using Serilog;
 using SharpCompress.Archives;
 using SharpCompress.Archives.Tar;
@@ -44,122 +39,108 @@ public class TTSService : ITTSService
         _preferencesService = preferencesService;
         _environmentService = environmentService;
     }
+    //returns true when updates are available, false when none are
+    public async Task<bool> CheckUpdates() {
+        VersionModel? localVersion = null;
+        string TTSPath = _preferencesService.GetPreferences().TTSPath;
 
-    public async Task CheckAndDownloadLatestVersion(Download Download)
-    {
-        if ((_preferencesService.GetPreferences().TTSEnabled is true) == false)
+        try
         {
-            return;
+            var VersionFile = System.IO.Path.Combine(TTSPath, "version.txt");
+            if (System.IO.File.Exists(VersionFile))
+            {
+                // Read the JSON file content
+                string jsonContent = System.IO.File.ReadAllText(VersionFile);
+
+                // Deserialize the JSON content into an object
+                localVersion = JsonSerializer.Deserialize<VersionModel>(jsonContent);
+            }
+        } 
+        catch (FileNotFoundException) {
+            return true; //true because no version is always older than a version
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Exception while reading TTS Version on disk: {ex.Message}");
         }
 
-        if (_environmentService.GetCurrentEnvironment() == CurrentEnvironment.MacOsStandalone)
-        {
-            Log.Error(
-                "MAC TTS Is not currently supported, If you would like to add support Join the discord and contribute");
-            return;
-        }
-
-        string jsonData = "";
+        string jsonData;
         try
         {
             HttpResponseMessage response = await _httpClient.GetAsync(ApiUrls.TTSVersionFile);
             if (!response.IsSuccessStatusCode)
             {
-                Log.Error("Unable to download config" + response);
-                return;
+                Log.Error("Unable to download TTS Version" + response);
+                return false;
             }
 
             jsonData = await response.Content.ReadAsStringAsync();
         }
         catch (Exception e)
         {
-            Log.Error("Unable to download ValidGoodFilesVersionAsync config" + e);
-            return;
+            Log.Error("Unable to download TTS Version" + e);
+            return false;
         }
 
-
-        VersionModel? CurrentVersion = JsonSerializer.Deserialize<VersionModel>(jsonData, options: new()
+        VersionModel? remoteVersion = JsonSerializer.Deserialize<VersionModel>(jsonData, options: new()
         {
             IgnoreReadOnlyProperties = true,
             PropertyNameCaseInsensitive = true
         });
 
-        if (CurrentVersion == null)
-        {
-            return;
-        }
-
-        string installationBasePath = _preferencesService.GetPreferences().InstallationPath;
-
-        VersionModel? localVersionModel = null;
-
+        return localVersion != null || localVersion != remoteVersion;
+    }
+    public async Task DownloadLatest(Download Download)
+    {
+        string TTSPath = _preferencesService.GetPreferences().TTSPath;
         try
         {
-            var LocalVersion = System.IO.Path.Combine(installationBasePath, "tts", "version.txt");
-            if (System.IO.File.Exists(LocalVersion))
+            Download.Active = true;
+            Download.DownloadState = DownloadState.InProgress;
+            StopTTS();
+            // await Task.Delay(2 * 1000); //to give it some grace period to shutdown
+
+            if (System.IO.Directory.Exists(TTSPath))
             {
-                // Read the JSON file content
-                string jsonContent = System.IO.File.ReadAllText(LocalVersion);
-
-                // Deserialize the JSON content into an object
-                localVersionModel = JsonSerializer.Deserialize<VersionModel>(jsonContent);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"An error occurred: {ex.Message}");
-        }
-
-
-        try
-        {
-            if (localVersionModel == null || localVersionModel.Version != CurrentVersion.Version)
-            {
-                Download.Active = true;
-                Download.DownloadState = DownloadState.InProgress;
-                StopTTS();
-                await Task.Delay(2 * 1000); //to give it some grace period to shutdown
-
-                var LocalVersion = System.IO.Path.Combine(installationBasePath, "tts");
-                if (System.IO.Directory.Exists(LocalVersion))
+                foreach (var file in System.IO.Directory.GetFiles(TTSPath))
                 {
-                    foreach (var file in System.IO.Directory.GetFiles(LocalVersion))
-                    {
-                        System.IO.File.Delete(file);
-                    }
-
-                    foreach (var directory in System.IO.Directory.GetDirectories(LocalVersion))
-                    {
-                        System.IO.Directory.Delete(directory, true);
-                    }
+                    System.IO.File.Delete(file);
                 }
 
-                var zip = _environmentService.GetCurrentEnvironment() switch
+                foreach (var directory in System.IO.Directory.GetDirectories(TTSPath))
                 {
-                    CurrentEnvironment.WindowsStandalone => "win.zip",
-                    //CurrentEnvironment.MacOsStandalone => "mac.zip",
-                    CurrentEnvironment.LinuxStandalone or CurrentEnvironment.LinuxFlatpak => "lnx.tar.xz",
-                    _ => null
-                };
-
-
-
-                HttpResponseMessage request = await _httpClient.GetAsync(ApiUrls.TTSFiles + "/" + zip,
-                    HttpCompletionOption.ResponseHeadersRead);
-
-                using Stream responseStream = await request.Content.ReadAsStreamAsync();
-                Log.Information("Download connection established");
-                await using ProgressStream progressStream = new(responseStream);
-                using IDisposable logProgressDisposable = InstallationService.LogProgress(progressStream, Download);
-
-                Download.Size = request.Content.Headers.ContentLength ??
-                                throw new ContentLengthNullException(ApiUrls.TTSFiles + "/" + zip);
-
-                using IDisposable progressDisposable = progressStream.Progress.Subscribe(p => { Download.Downloaded = p; });
-
-                await Task.Run(() => ExtractTo(progressStream, LocalVersion, Download));
+                    System.IO.Directory.Delete(directory, true);
+                }
             }
-            //Is find no need to update
+
+            var zip = _environmentService.GetCurrentEnvironment() switch
+            {
+                CurrentEnvironment.WindowsStandalone => "win.zip",
+                //CurrentEnvironment.MacOsStandalone => "mac.zip",
+                CurrentEnvironment.LinuxStandalone or CurrentEnvironment.LinuxFlatpak => "lnx.tar.xz",
+                _ => null
+            };
+
+
+
+            HttpResponseMessage request = await _httpClient.GetAsync(ApiUrls.TTSFiles + "/" + zip,
+                HttpCompletionOption.ResponseHeadersRead);
+
+            using Stream responseStream = await request.Content.ReadAsStreamAsync();
+            Log.Information("Download connection established");
+            await using ProgressStream progressStream = new(responseStream);
+            using IDisposable logProgressDisposable = InstallationService.LogProgress(progressStream, Download);
+
+            Download.Size = request.Content.Headers.ContentLength ??
+                            throw new ContentLengthNullException(ApiUrls.TTSFiles + "/" + zip);
+
+            using IDisposable progressDisposable = progressStream.Progress.Subscribe(p => { Download.Downloaded = p; });
+
+            await Task.Run(() => Extract(progressStream));
+
+            Download.Active = false;
+            Download.DownloadState = DownloadState.InProgress;
+            StartTTS();
         }
         catch (Exception e)
         {
@@ -169,7 +150,7 @@ public class TTSService : ITTSService
     }
 
 
-    private void ExtractTo(Stream progressStream, string LocalVersion, Download Download)
+    private void Extract(Stream progressStream)
     {
 
         switch (_environmentService.GetCurrentEnvironment())
@@ -177,22 +158,18 @@ public class TTSService : ITTSService
             case CurrentEnvironment.WindowsStandalone:
                 {
                     ZipArchive archive = new(progressStream);
-                    archive.ExtractToDirectory(LocalVersion, true);
+                    archive.ExtractToDirectory("tts", true);
                     break;
                 }
             case CurrentEnvironment.LinuxStandalone or CurrentEnvironment.LinuxFlatpak:
                 {
                     using var decompressedStream = DecompressXz(progressStream); // Decompress XZ stream to get .tar
-                    ExtractTar(decompressedStream, LocalVersion);
+                    ExtractTar(decompressedStream, "tts");
                     break;
                 }
             default:
-                throw new Exception("Unsupported OS");
+                throw new Exception("Unsupported OS: " + _environmentService.GetCurrentEnvironment().ToString());
         }
-
-        Download.Active = false;
-        Download.DownloadState = DownloadState.InProgress;
-        StartTTS();
     }
 
     private static Stream DecompressXz(Stream compressedStream)
@@ -257,34 +234,25 @@ public class TTSService : ITTSService
 
     public void StartTTS()
     {
-        var Preference = _preferencesService.GetPreferences();
-        if ((Preference.TTSEnabled is true) == false) return;
-
         try
         {
             if (process != null && process.HasExited == false)
-            {
                 return;
-            }
         }
         catch (Exception e)
         {
-            Log.Error(e.ToString());
+            Log.Error("Error while Querying TTS Process: " + e.ToString());
         }
 
 
-        string installationBasePath = _preferencesService.GetPreferences().InstallationPath;
-        var LocalVersion = System.IO.Path.Combine(installationBasePath, "tts");
-        if (System.IO.Directory.Exists(LocalVersion) == false)
-        {
+        string TTSPath = _preferencesService.GetPreferences().TTSPath;
+        if (System.IO.Directory.Exists(TTSPath) == false)
             return; //Not installed
-        }
 
         (string?, string?) executable = FindExecutable();
         if (string.IsNullOrWhiteSpace(executable.Item1))
         {
-            const string failureReason = "Couldn't find executable to start.";
-            Log.Warning(failureReason + $" Installation Path: {executable.Item1 ?? "null"}");
+            Log.Warning($"Couldn't find TTS executable. Installation Path: {executable.Item1 ?? "null"}");
             return;
         }
 
@@ -322,9 +290,7 @@ public class TTSService : ITTSService
             if (process != null)
             {
                 if (process.HasExited == false)
-                {
                     process.Kill();
-                }
             }
 
         };
@@ -335,7 +301,7 @@ public class TTSService : ITTSService
         }
         catch (Exception ex)
         {
-            Log.Error($"Error starting process: {ex.Message}");
+            Log.Error($"Error starting TTS process: {ex.Message}");
         }
     }
 
@@ -349,11 +315,12 @@ public class TTSService : ITTSService
                 if (process.HasExited == false)
                 {
                     process.Kill();
+                    process.WaitForExit();
                 }
             }
             catch (Exception e)
             {
-                Log.Error(e.ToString());
+                Log.Error("Exception while stopping TTS: " + e.ToString());
             }
 
         }

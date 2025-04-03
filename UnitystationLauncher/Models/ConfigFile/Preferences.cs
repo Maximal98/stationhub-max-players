@@ -8,6 +8,7 @@ public class Preferences : ReactiveObject
     private int _ignoreVersionUpdate;
     private string _installationPath = string.Empty;
     private bool? _TTSEnabled = null;
+    private string _ttsPath = string.Empty;
 
     public bool AutoRemove
     {
@@ -31,5 +32,11 @@ public class Preferences : ReactiveObject
     {
         get => _TTSEnabled;
         set => this.RaiseAndSetIfChanged(ref _TTSEnabled, value);
+    }
+
+    public string TTSPath
+    {
+        get => _ttsPath; //should this be _TTSPath or should it be _ttsEnabled
+        set => this.RaiseAndSetIfChanged(ref _ttsPath, value);
     }
 }
